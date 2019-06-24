@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  "AWS template to deploy EC2 code server instance"
+
+Parameters:
+  VpcId:
+    Type: "AWS::EC2::VPC::Id"
+    Description: "Enter a valid vpc identifier."
+  SubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "Enter a valid (public) subnet identifier."
+  ExposedPort:
+    Type: Number
+    Description: "Enter the port used to expose the service."
+    Default: 443
+  SourceIP:
+    Type: String
+    Description: "Enter the IP allowed to reach the exposed service (it's strongly suggested to put IP restriction)."
+    Default: "0.0.0.0/0"
+  CertificateParameterName:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: "Enter the name of the parameter that contains the certificate (this parameter must be created before creation of the stack)."
+  PrivateKeyParameterName:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: "Enter the name of the parameter that contains the private key (this parameter must be created before creation of the stack)."
+  InstanceFamily:
+    Type: String
+    Description: "Enter the family type of your instance (too small instances will run in failure more frequently)."
+    Default: "t3.small"
+  RootVolumeDimension:
+    Type: Number
+    Description: "Enter the dimension of the root volume (remember to save your work or push it before deleting the cluster)."
+    Default: 30
+  KeyPairName:
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Description: "Enter the name of the key pair you want attach to the instance (this key need to be created before creation of the stack)."
+    Default: "codeserver"
+  DomainName:
+    Type: String
+    Description: "Enter the domain to expose the service."
+  HostedZoneId:
+    Type: "AWS::Route53::HostedZone::Id"
+    Description: "Enter a valid Hosted Zone name for record set to expose the service."
+  AppPassword:
+    NoEcho: true
+    Type: String
+    Description: "Enter the password to access codeserver."
+    MinLength: 12
+    MaxLength: 41
+    AllowedPattern: "^[a-zA-Z0-9]*$"
+
+Mappings:
+  RegionAmiMap:
+    ca-central-1:
+      AMI: ami-0827e3df5a5cdb6a6
+    eu-north-1:
+      AMI: ami-6e2ba310
+    us-east-2:
+      AMI: ami-00c79db59589996b9
+    eu-west-3:
+      AMI: ami-07d80b16fe4b2de61
+    eu-west-2:
+      AMI: ami-08afc3105ef372053
+    eu-central-1:
+      AMI: ami-0cd855c8009cb26ef
+    us-east-1:
+      AMI: ami-0cc96feef8c6bbff3
+    sa-east-1:
+      AMI: ami-083cd84588c53dffa
+    ap-south-1:
+      AMI: ami-0b3046001e1ba9a99
+    eu-west-1:
+      AMI: ami-01f3682deed220c2a
+    ap-northeast-2:
+      AMI: ami-0c28c81fda53dcb86
+    us-west-2:
+      AMI: ami-07669fc90e6e6cc47
+    ap-northeast-1:
+      AMI: ami-084040f99a74ce8c3
+    ap-southeast-2:
+      AMI: ami-0c1d8842b9bfc767c
+    ap-southeast-1:
+      AMI: ami-0602ae7e6b9191aea
+    us-west-1:
+      AMI: ami-0ce5ae170b49e3870
+
+Resources:
+  CodeServerPublicAccessSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "Public access to the instance"
+      GroupDescription: "Public access to the instance"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ExposedPort
+          ToPort: !Ref ExposedPort
+          CidrIp: !Ref SourceIP
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SourceIP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  CodeServerPublicInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      KeyName: !Ref KeyPairName
+      ImageId: !FindInMap [RegionAmiMap, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceFamily
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeDimension
+      Monitoring: false
+      SecurityGroupIds:
+        - !Ref CodeServerPublicAccessSg
+      SubnetId: !Ref SubnetId
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            - - "#!/bin/bash -xe\n"
+              - "/opt/aws/bin/cfn-init -v "
+              - "         --stack "
+              - Ref: AWS::StackName
+              - "         --resource CodeServerPublicInstance"
+              - "         --configsets end-to-end"
+              - "         --region "
+              - Ref: AWS::Region
+              - "\n"
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          end-to-end:
+            - Install
+            - Setup
+            - Service
+        Install:
+          packages:
+            yum:
+              docker: []
+              wget: []
+              gzip: []
+        Setup:
+          files:
+            "/etc/pki/CA/private/cert1.pem":
+              content:
+                Fn::Join:
+                  - ""
+                  - - ""
+                    - !Ref CertificateParameterName
+              mode: "000600"
+              owner: root
+              group: root
+            "/etc/pki/CA/private/privkey1.pem":
+              content:
+                Fn::Join:
+                  - ""
+                  - - ""
+                    - !Ref PrivateKeyParameterName
+              mode: "000600"
+              owner: root
+              group: root
+          commands:
+            01-wget:
+              command: wget https://github.com/cdr/code-server/releases/download/1.1156-vsc1.33.1/code-server1.1156-vsc1.33.1-linux-x64.tar.gz
+              cwd: "~"
+            02-tar:
+              command: tar -xvzf code-server1.1156-vsc1.33.1-linux-x64.tar.gz
+              cwd: "~"
+            03-copy:
+              command: cp code-server1.1156-vsc1.33.1-linux-x64/code-server /usr/bin/
+              cwd: "~"
+            04-chmod-bin:
+              command: chmod +x /usr/bin/code-server
+              cwd: "~"
+        Service:
+          commands:
+            05-service-creation:
+              command: !Sub |
+                cat <<EOF >> /etc/systemd/system/code-server.service
+                [Unit]
+                Description=Code server systemd service
+
+                [Service]
+                Type=simple
+                Restart=always
+                RestartSec=5s
+                ExecStart=/usr/bin/code-server --disable-telemetry --password ${AppPassword} --port ${ExposedPort} --cert=/etc/pki/CA/private/cert1.pem --cert-key=/etc/pki/CA/private/privkey1.pem
+
+                [Install]
+                WantedBy=multi-user.target
+                EOF
+              cwd: "~"
+            06-chmod-service:
+              command: "chmod 644 /etc/systemd/system/code-server.service"
+              cwd: "~"
+            07-chmod-service:
+              command: "systemctl --system daemon-reload"
+              cwd: "~"
+            08-systemctl-start:
+              command: "systemctl enable code-server "
+              cwd: "~"
+            09-systemctl-enable:
+              command: "systemctl start code-server "
+              cwd: "~"
+          services:
+            sysvinit:
+              code-server:
+                enabled: "true"
+                ensureRunning: "true"
+  CodeServerPublicInstanceRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Ref: HostedZoneId
+      Comment: Code server public instance domain name
+      Name:
+        Fn::Join:
+        - ''
+        - - Ref: CodeServerPublicInstance
+          - "."
+          - Ref: DomainName
+          - "."
+      Type: A
+      TTL: '60'
+      ResourceRecords:
+      - Fn::GetAtt:
+        - CodeServerPublicInstance
+        - PublicIp
+
+Outputs:
+  PublicDNS:
+    Value: 
+      Fn::Join:
+        - ''
+        - - Ref: CodeServerPublicInstance
+          - "."
+          - Ref: DomainName
