@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  "AWS template to deploy EC2 code server instance"
+
+Parameters:
+  VpcId:
+    Type: "AWS::EC2::VPC::Id"
+    Description: "Enter a valid vpc identifier."
+  SubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "Enter a valid (public) subnet identifier."
+  ExposedPort:
+    Type: Number
+    Description: "Enter the port used to expose the service."
+    Default: 443
+  TraefikDashboardPort:
+    Type: Number
+    Description: "Enter the port used to expose the traefik dashboard."
+  SourceIP:
+    Type: String
+    Description: "Enter the IP allowed to reach the exposed service (it's strongly suggested to put IP restriction)."
+    Default: "0.0.0.0/0"
+  CertificateParameterName:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: "Enter the name of the parameter that contains the certificate (this parameter must be created before creation of the stack)."
+  PrivateKeyParameterName:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: "Enter the name of the parameter that contains the private key (this parameter must be created before creation of the stack)."
+  InstanceFamily:
+    Type: String
+    Description: "Enter the family type of your instance (too small instances will run in failure more frequently)."
+  RootVolumeDimension:
+    Type: Number
+    Description: "Enter the dimension of the root volume (remember to save your work or push it before deleting the cluster)."
+    Default: 30
+  KeyPairName:
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Description: "Enter the name of the key pair you want attach to the instance (this key need to be created before creation of the stack)."
+  DomainName:
+    Type: String
+    Description: "Enter the domain to expose the service."
+  HostedZoneId:
+    Type: "AWS::Route53::HostedZone::Id"
+    Description: "Enter a valid Hosted Zone name for record set to expose the service."
+  TraefikDashboardPassword:
+    NoEcho: true
+    Type: String
+    Description: "Enter the password to access traefik dashboard."
+    MinLength: 12
+    MaxLength: 41
+    AllowedPattern: "^[a-zA-Z0-9]*$"
+  AppPassword:
+    NoEcho: true
+    Type: String
+    Description: "Enter the password to access codeserver."
+    MinLength: 12
+    MaxLength: 41
+    AllowedPattern: "^[a-zA-Z0-9]*$"
+
+Mappings:
+  RegionAmiMap:
+    ca-central-1:
+      AMI: ami-0827e3df5a5cdb6a6
+    eu-north-1:
+      AMI: ami-6e2ba310
+    us-east-2:
+      AMI: ami-00c79db59589996b9
+    eu-west-3:
+      AMI: ami-07d80b16fe4b2de61
+    eu-west-2:
+      AMI: ami-08afc3105ef372053
+    eu-central-1:
+      AMI: ami-0cd855c8009cb26ef
+    us-east-1:
+      AMI: ami-0cc96feef8c6bbff3
+    sa-east-1:
+      AMI: ami-083cd84588c53dffa
+    ap-south-1:
+      AMI: ami-0b3046001e1ba9a99
+    eu-west-1:
+      AMI: ami-01f3682deed220c2a
+    ap-northeast-2:
+      AMI: ami-0c28c81fda53dcb86
+    us-west-2:
+      AMI: ami-07669fc90e6e6cc47
+    ap-northeast-1:
+      AMI: ami-084040f99a74ce8c3
+    ap-southeast-2:
+      AMI: ami-0c1d8842b9bfc767c
+    ap-southeast-1:
+      AMI: ami-0602ae7e6b9191aea
+    us-west-1:
+      AMI: ami-0ce5ae170b49e3870
+
+Resources:
+  CodeServerPublicAccessSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "Public access to the instance"
+      GroupDescription: "Public access to the instance"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ExposedPort
+          ToPort: !Ref ExposedPort
+          CidrIp: !Ref SourceIP
+        - IpProtocol: tcp
+          FromPort: !Ref TraefikDashboardPort
+          ToPort: !Ref TraefikDashboardPort
+          CidrIp: !Ref SourceIP
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SourceIP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  CodeServerPublicInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      KeyName: !Ref KeyPairName
+      ImageId: !FindInMap [RegionAmiMap, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceFamily
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeDimension
+      Monitoring: false
+      SecurityGroupIds:
+        - !Ref CodeServerPublicAccessSg
+      SubnetId: !Ref SubnetId
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            - - "#!/bin/bash -xe\n"
+              - "/opt/aws/bin/cfn-init -v "
+              - "         --stack "
+              - Ref: AWS::StackName
+              - "         --resource CodeServerPublicInstance"
+              - "         --configsets end-to-end"
+              - "         --region "
+              - Ref: AWS::Region
+              - "\n"
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          end-to-end:
+            - install-packages
+            - setup-and-config
+            - start-services
+        install-packages:
+          packages:
+            yum:
+              docker: []
+              wget: []
+              gzip: []
+        setup-and-config:
+          files:
+            "/etc/pki/CA/private/cert1.pem":
+              content:
+                Fn::Join:
+                  - ""
+                  - - ""
+                    - !Ref CertificateParameterName
+              mode: "000600"
+              owner: root
+              group: root
+            "/etc/pki/CA/private/privkey1.pem":
+              content:
+                Fn::Join:
+                  - ""
+                  - - ""
+                    - !Ref PrivateKeyParameterName
+              mode: "000600"
+              owner: root
+              group: root
+          commands:
+            01-docker-start:
+              command: "sudo service docker start"
+              cwd: "~"
+            02-docker-user-group:
+              command: "sudo usermod -a -G docker ec2-user"
+              cwd: "~"
+            03-traefik-setup-01:
+              command: "sudo docker network create codeserver"
+              cwd: "~"
+            04-docker-pull-code-server:
+              command: sudo docker pull codercom/code-server
+              cwd: "~"
+            05-docker-pull-traefik:
+              command: sudo docker pull traefik:1.7.6-alpine
+              cwd: "~"
+            06-traefik-config-file-toml:
+              command: !Sub |
+                cat << EOF > /root/.traefik.toml
+                defaultEntryPoints = ["http", "https"]
+
+                [entryPoints]
+                  [entryPoints.dashboard]
+                    address = ":${TraefikDashboardPort}"
+                    [entryPoints.dashboard.auth]
+                      [entryPoints.dashboard.auth.basic]
+                        users = ["admin:${TraefikDashboardPassword}"]
+                  [entryPoints.http]
+                    address = ":80"
+                      [entryPoints.http.redirect]
+                        entryPoint = "https"
+                  [entryPoints.https]
+                    address = ":443"
+                      [entryPoints.https.tls]
+                        [[entryPoints.https.tls.certificates]]
+                          certFile = "/etc/pki/CA/private/cert1.pem"
+                          keyFile = "/etc/pki/CA/private/privkey1.pem"
+
+                [api]
+                  entrypoint="dashboard"
+
+                [docker]
+                  endpoint = "unix:///var/run/docker.sock"
+                  domain = "${DomainName}"
+                  network = "codeserver"
+                  watch = true
+                EOF
+              cwd: "~"
+            07-traefik-config-file-acme:
+              command: "sudo touch /root/.acme.json && sudo chmod 640 /root/.acme.json"
+              cwd: "~"
+        start-services:
+          commands:
+            08-traefik-start:
+              command: !Sub |
+                docker run -d \
+                  -v /var/run/docker.sock:/var/run/docker.sock \
+                  -v /root/.traefik.toml:/traefik.toml \
+                  -v /root/.acme.json:/acme.json \
+                  -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
+                  -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
+                  -p 80:80 \
+                  -p ${ExposedPort}:${ExposedPort} \
+                  -l traefik.frontend.rule=Host:monitor.${DomainName} \
+                  -l traefik.port=${TraefikDashboardPort} \
+                  --network "codeserver" \
+                  --name traefik \
+                  traefik:1.7.6-alpine
+              cwd: "~"
+            09-code-server-start:
+              command: !Sub |
+                for i in $(seq 1 5); do
+                  mkdir -p /home/ec2-user/dev-${!i}/
+                  docker run -d \
+                      -v "/home/ec2-user/dev-${!i}:/home/coder/project" \
+                      -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
+                      -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
+                      --label traefik.backend=dev-${!i} \
+                      --label traefik.frontend.rule=Host:dev-${!i}.${DomainName} \
+                      --label traefik.docker.network=codeserver \
+                      --label traefik.port=80 \
+                      --network="codeserver" \
+                      codercom/code-server \
+                      --disable-telemetry \
+                      --password ${AppPassword} \
+                      --port ${ExposedPort} \
+                      --cert=/etc/pki/CA/private/cert1.pem \
+                      --cert-key=/etc/pki/CA/private/privkey1.pem
+                done
+              cwd: "~"
+  CodeServerPublicInstanceRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Ref: HostedZoneId
+      Comment: Code server public instance domain name
+      Name:
+        Fn::Join:
+          - ""
+          - - Ref: CodeServerPublicInstance
+            - "."
+            - Ref: DomainName
+            - "."
+      Type: A
+      TTL: "60"
+      ResourceRecords:
+        - Fn::GetAtt:
+            - CodeServerPublicInstance
+            - PublicIp
+# Outputs:
+#   PublicDNS:
+#     Value:
+#       Fn::Join:
+#         - ""
+#         - - Ref: CodeServerPublicInstance
+#           - "."
+#           - Ref: DomainName
