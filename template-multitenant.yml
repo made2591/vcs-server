@@ -16,6 +16,7 @@ Parameters:
   TraefikDashboardPort:
     Type: Number
     Description: "Enter the port used to expose the traefik dashboard."
+    Default: 8090
   SourceIP:
     Type: String
     Description: "Enter the IP allowed to reach the exposed service (it's strongly suggested to put IP restriction)."
@@ -26,9 +27,14 @@ Parameters:
   PrivateKeyParameterName:
     Type: "AWS::SSM::Parameter::Value<String>"
     Description: "Enter the name of the parameter that contains the private key (this parameter must be created before creation of the stack)."
+  NumberOfUsers:
+    Type: Number
+    Description: "Enter the number of instances you want to run."
+    Default: 1
   InstanceFamily:
     Type: String
     Description: "Enter the family type of your instance (too small instances will run in failure more frequently)."
+    Default: "t3.small"
   RootVolumeDimension:
     Type: Number
     Description: "Enter the dimension of the root volume (remember to save your work or push it before deleting the cluster)."
@@ -46,16 +52,14 @@ Parameters:
     NoEcho: true
     Type: String
     Description: "Enter the password to access traefik dashboard."
-    MinLength: 12
-    MaxLength: 41
-    AllowedPattern: "^[a-zA-Z0-9]*$"
+    MinLength: 16
+    MaxLength: 64
   AppPassword:
     NoEcho: true
     Type: String
     Description: "Enter the password to access codeserver."
-    MinLength: 12
-    MaxLength: 41
-    AllowedPattern: "^[a-zA-Z0-9]*$"
+    MinLength: 16
+    MaxLength: 64
 
 Mappings:
   RegionAmiMap:
@@ -107,6 +111,10 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref TraefikDashboardPort
           ToPort: !Ref TraefikDashboardPort
+          CidrIp: !Ref SourceIP
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
           CidrIp: !Ref SourceIP
         - IpProtocol: tcp
           FromPort: 22
@@ -176,25 +184,25 @@ Resources:
               owner: root
               group: root
           commands:
-            01-docker-start:
-              command: "sudo service docker start"
+            01-docker-user-group:
+              command: "usermod -a -G docker ec2-user"
               cwd: "~"
-            02-docker-user-group:
-              command: "sudo usermod -a -G docker ec2-user"
+            02-docker-start:
+              command: "service docker start"
               cwd: "~"
             03-traefik-setup-01:
-              command: "sudo docker network create codeserver"
+              command: "docker network create codeserver"
               cwd: "~"
             04-docker-pull-code-server:
-              command: sudo docker pull codercom/code-server
+              command: docker pull codercom/code-server
               cwd: "~"
             05-docker-pull-traefik:
-              command: sudo docker pull traefik:1.7.6-alpine
+              command: docker pull traefik:1.7.6-alpine
               cwd: "~"
             06-traefik-config-file-toml:
               command: !Sub |
                 cat << EOF > /root/.traefik.toml
-                defaultEntryPoints = ["http", "https"]
+                defaultEntryPoints = ["https"]
 
                 [entryPoints]
                   [entryPoints.dashboard]
@@ -224,7 +232,7 @@ Resources:
                 EOF
               cwd: "~"
             07-traefik-config-file-acme:
-              command: "sudo touch /root/.acme.json && sudo chmod 640 /root/.acme.json"
+              command: "touch /root/.acme.json && chmod 640 /root/.acme.json"
               cwd: "~"
         start-services:
           commands:
@@ -238,6 +246,7 @@ Resources:
                   -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
                   -p 80:80 \
                   -p ${ExposedPort}:${ExposedPort} \
+                  -p ${TraefikDashboardPort}:${TraefikDashboardPort} \
                   -l traefik.frontend.rule=Host:monitor.${DomainName} \
                   -l traefik.port=${TraefikDashboardPort} \
                   --network "codeserver" \
@@ -246,23 +255,23 @@ Resources:
               cwd: "~"
             09-code-server-start:
               command: !Sub |
-                for i in $(seq 1 5); do
+                for i in $(seq 1 ${NumberOfUsers}); do
                   mkdir -p /home/ec2-user/dev-${!i}/
-                  docker run -d \
-                      -v "/home/ec2-user/dev-${!i}:/home/coder/project" \
-                      -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
-                      -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
-                      --label traefik.backend=dev-${!i} \
-                      --label traefik.frontend.rule=Host:dev-${!i}.${DomainName} \
-                      --label traefik.docker.network=codeserver \
-                      --label traefik.port=80 \
-                      --network="codeserver" \
-                      codercom/code-server \
-                      --disable-telemetry \
-                      --password ${AppPassword} \
-                      --port ${ExposedPort} \
-                      --cert=/etc/pki/CA/private/cert1.pem \
-                      --cert-key=/etc/pki/CA/private/privkey1.pem
+                  docker run -d --rm \
+                    -v "/home/ec2-user/dev-${!i}:/home/coder/project" \
+                    -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
+                    -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
+                    --label traefik.backend=dev-${!i} \
+                    --label traefik.frontend.rule=Host:dev-${!i}.${DomainName} \
+                    --label traefik.docker.network=codeserver \
+                    --label traefik.port=80 \
+                    --network="codeserver" \
+                    --name dev-${!i} \
+                    codercom/code-server \
+                    --disable-telemetry \
+                    --no-auth \
+                    --cert=/etc/pki/CA/private/cert1.pem \
+                    --cert-key=/etc/pki/CA/private/privkey1.pem
                 done
               cwd: "~"
   CodeServerPublicInstanceRecordSet:
@@ -284,11 +293,12 @@ Resources:
         - Fn::GetAtt:
             - CodeServerPublicInstance
             - PublicIp
-# Outputs:
-#   PublicDNS:
-#     Value:
-#       Fn::Join:
-#         - ""
-#         - - Ref: CodeServerPublicInstance
-#           - "."
-#           - Ref: DomainName
+
+Outputs:
+  PublicDNS:
+    Value:
+      Fn::Join:
+        - ""
+        - - Ref: CodeServerPublicInstance
+          - "."
+          - Ref: DomainName
