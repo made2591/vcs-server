@@ -171,7 +171,7 @@ Resources:
                   - ""
                   - - ""
                     - !Ref CertificateParameterName
-              mode: "000600"
+              mode: "000644"
               owner: root
               group: root
             "/etc/pki/CA/private/privkey1.pem":
@@ -180,7 +180,7 @@ Resources:
                   - ""
                   - - ""
                     - !Ref PrivateKeyParameterName
-              mode: "000600"
+              mode: "000644"
               owner: root
               group: root
           commands:
@@ -202,7 +202,7 @@ Resources:
             06-traefik-config-file-toml:
               command: !Sub |
                 cat << EOF > /root/.traefik.toml
-                defaultEntryPoints = ["https"]
+                defaultEntryPoints = ["http", "https"]
 
                 [entryPoints]
                   [entryPoints.dashboard]
@@ -238,18 +238,20 @@ Resources:
           commands:
             08-traefik-start:
               command: !Sub |
-                docker run -d \
+                docker run -d --rm \
                   -v /var/run/docker.sock:/var/run/docker.sock \
                   -v /root/.traefik.toml:/traefik.toml \
                   -v /root/.acme.json:/acme.json \
                   -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
                   -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
                   -p 80:80 \
+                  -p 8443:8443 \
                   -p ${ExposedPort}:${ExposedPort} \
                   -p ${TraefikDashboardPort}:${TraefikDashboardPort} \
                   -l traefik.frontend.rule=Host:monitor.${DomainName} \
                   -l traefik.port=${TraefikDashboardPort} \
-                  --network "codeserver" \
+                  -l traefik.docker.network=codeserver \
+                  --network codeserver \
                   --name traefik \
                   traefik:1.7.6-alpine
               cwd: "~"
@@ -257,7 +259,7 @@ Resources:
               command: !Sub |
                 for i in $(seq 1 ${NumberOfUsers}); do
                   mkdir -p /home/ec2-user/dev-${!i}/
-                  docker run -d --rm -p 80 \
+                  docker run -d --rm -p 8443 -p 80 \
                     -v "/home/ec2-user/dev-${!i}:/home/coder/project" \
                     -v /etc/pki/CA/private/cert1.pem:/etc/pki/CA/private/cert1.pem \
                     -v /etc/pki/CA/private/privkey1.pem:/etc/pki/CA/private/privkey1.pem \
@@ -265,9 +267,8 @@ Resources:
                     --label traefik.frontend.rule=Host:dev-${!i}.${DomainName} \
                     --label traefik.docker.network=codeserver \
                     --label traefik.enable=true \
-                    --label traefik.default.protocol=http \
-                    --label traefik.port=80 \
-                    --network="codeserver" \
+                    --label traefik.port=8443 \
+                    --network codeserver \
                     --name dev-${!i} \
                     codercom/code-server \
                     --disable-telemetry \
