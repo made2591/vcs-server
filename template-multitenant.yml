@@ -123,6 +123,38 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
+  CodeServerPublicInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "Route53 add record set to reach machine"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "route53:ChangeResourceRecordSets"
+                Resource: !Ref HostedZoneId
+                Condition:
+                  DateGreaterThan:
+                    aws:CurrentTime: "2017-07-01T00:00:00Z"
+                  DateLessThan:
+                    aws:CurrentTime: "2017-12-31T23:59:59Z"
+  CodeServerPublicInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref CodeServerPublicInstanceRole
   CodeServerPublicInstance:
     Type: AWS::EC2::Instance
     Properties:
@@ -134,6 +166,7 @@ Resources:
           Ebs:
             VolumeSize: !Ref RootVolumeDimension
       Monitoring: false
+      IamInstanceProfile: !Ref CodeServerPublicInstanceProfile
       SecurityGroupIds:
         - !Ref CodeServerPublicAccessSg
       SubnetId: !Ref SubnetId
@@ -185,10 +218,10 @@ Resources:
               group: root
           commands:
             01-docker-user-group:
-              command: "usermod -a -G docker ec2-user"
+              command: "sudo usermod -a -G docker ec2-user"
               cwd: "~"
             02-docker-start:
-              command: "service docker start"
+              command: "sudo service docker start"
               cwd: "~"
             03-traefik-setup-01:
               command: "docker network create codeserver"
