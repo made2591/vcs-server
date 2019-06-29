@@ -126,6 +126,19 @@ Resources:
   CodeServerPublicInstanceRole:
     Type: "AWS::IAM::Role"
     Properties:
+      Policies:
+        - PolicyName: "CodeServerPublicInstancePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "route53:ChangeResourceRecordSets"
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:aws:route53:::hostedzone/"
+                      - !Ref HostedZoneId
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -136,19 +149,6 @@ Resources:
             Action:
               - "sts:AssumeRole"
       Path: "/"
-      Policies:
-        - PolicyName: "Route53 add record set to reach machine"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action: "route53:ChangeResourceRecordSets"
-                Resource: !Ref HostedZoneId
-                Condition:
-                  DateGreaterThan:
-                    aws:CurrentTime: "2017-07-01T00:00:00Z"
-                  DateLessThan:
-                    aws:CurrentTime: "2017-12-31T23:59:59Z"
   CodeServerPublicInstanceProfile:
     Type: "AWS::IAM::InstanceProfile"
     Properties:
@@ -196,6 +196,7 @@ Resources:
               docker: []
               wget: []
               gzip: []
+              httpd: []
         setup-and-config:
           files:
             "/etc/pki/CA/private/cert1.pem":
@@ -242,7 +243,7 @@ Resources:
                     address = ":${TraefikDashboardPort}"
                     [entryPoints.dashboard.auth]
                       [entryPoints.dashboard.auth.basic]
-                        users = ["admin:${TraefikDashboardPassword}"]
+                        users = ["$(echo $(htpasswd -nbB admin "${TraefikDashboardPassword}"))"]
                   [entryPoints.http]
                     address = ":80"
                       [entryPoints.http.redirect]
@@ -271,6 +272,21 @@ Resources:
           commands:
             08-traefik-start:
               command: !Sub |
+                cat << EOF > /tmp/.monitor.${DomainName}.json
+                {
+                    "Comment": "Upsert route53 record for monitor.${DomainName}",
+                    "Changes": [{
+                        "Action": "UPSERT",
+                        "ResourceRecordSet": {
+                            "Name": "monitor.${DomainName}",
+                            "Type": "A",
+                            "TTL": 60,
+                            "ResourceRecords": [{
+                              "Value": "$(curl http://169.254.169.254/latest/meta-data/public-ipv4)"
+                            }]
+                        }
+                    }]
+                }
                 docker run -d --rm \
                   -v /var/run/docker.sock:/var/run/docker.sock \
                   -v /root/.traefik.toml:/traefik.toml \
@@ -287,10 +303,27 @@ Resources:
                   --network codeserver \
                   --name traefik \
                   traefik:1.7.6-alpine
+                aws route53 change-resource-record-sets --hosted-zone-id ${HostedZoneId} --change-batch file:///tmp/.monitor.${DomainName}.json
               cwd: "~"
             09-code-server-start:
               command: !Sub |
                 for i in $(seq 1 ${NumberOfUsers}); do
+                cat << EOF > /tmp/.dev-${!i}.${DomainName}.json
+                {
+                    "Comment": "Upsert route53 record for dev-${!i}.${DomainName}",
+                    "Changes": [{
+                        "Action": "UPSERT",
+                        "ResourceRecordSet": {
+                            "Name": "dev-${!i}.${DomainName}",
+                            "Type": "A",
+                            "TTL": 60,
+                            "ResourceRecords": [{
+                              "Value": "$(curl http://169.254.169.254/latest/meta-data/public-ipv4)"
+                            }]
+                        }
+                    }]
+                }
+                EOF
                   mkdir -p /home/ec2-user/dev-${!i}/
                   docker run -d --rm -p 8443 -p 80 \
                     -v "/home/ec2-user/dev-${!i}:/home/coder/project" \
@@ -301,6 +334,7 @@ Resources:
                     --label traefik.docker.network=codeserver \
                     --label traefik.enable=true \
                     --label traefik.port=8443 \
+                    --label traefik.frontend.auth.basic=$(echo $(htpasswd -nbB admin "${TraefikDashboardPassword}")) \
                     --network codeserver \
                     --name dev-${!i} \
                     codercom/code-server \
@@ -308,6 +342,7 @@ Resources:
                     --no-auth \
                     --cert=/etc/pki/CA/private/cert1.pem \
                     --cert-key=/etc/pki/CA/private/privkey1.pem
+                  aws route53 change-resource-record-sets --hosted-zone-id ${HostedZoneId} --change-batch file:///tmp/.dev-${!i}.${DomainName}.json
                 done
               cwd: "~"
   CodeServerPublicInstanceRecordSet:
